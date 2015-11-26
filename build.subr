@@ -1,0 +1,62 @@
+build_prepare ( ) {
+	mkdir -p ${MAKEOBJDIRPREFIX}
+}
+
+build_world ( ) {
+	echo "Build world at `date`"
+	make -C $FREEBSDSRC SRCCONF=${__BUILDWORLD_CONF} ${__BUILDWORLD_EXTRA_ARGS} buildworld
+}
+
+build_kernel ( ) {
+	echo "Build kernel at `date`"
+	make -C $FREEBSDSRC __MAKE_CONF=$__MAKECONF KERNCONF=$__KERNCONF ${__BUILDKERNEL_EXTRA_ARGS} buildkernel
+}
+
+build_image ( ) {
+	echo "Build OS Image at `date`"
+	
+	# Prepare image file
+	rm -rf ${IMAGEPATH}
+	truncate -s ${IMAGESIZE} ${IMAGEPATH}
+	mddev=$(sudo mdconfig -f ${IMAGEPATH} ${MDARGS})
+	echo "Use memory disk ${mddev}"
+	
+	# Create partitions
+	sudo gpart create -s ${PARTSCHEME} ${mddev}
+	sudo gpart add -t '!12' -a 63 -s ${FATSIZE} ${mddev}
+	sudo gpart set -a active -i 1 ${mddev}
+	sudo newfs_msdos -L msdosboot -F ${FATTYPE} /dev/${mddev}s1
+	sudo gpart add -t freebsd ${mddev}
+	sudo gpart create -s bsd ${mddev}s2
+	sudo gpart add -t freebsd-ufs -a 64k /dev/${mddev}s2
+	sudo newfs -U -L rootfs /dev/${mddev}s2a
+	sudo tunefs -N enable /dev/${mddev}s2a
+	
+	# Install world + kernel + distribution
+	mkdir -p ${MNTDIR}
+	sudo mount /dev/${mddev}s2a ${MNTDIR}
+	buildenv=`make -C $FREEBSDSRC buildenvvars`
+	eval sudo $buildenv make -C $FREEBSDSRC DESTDIR=$MNTDIR -DDB_FROM_SOURCE \
+		KERNCONF=$__KERNCONF __MAKE_CONF=${__MAKECONF} SRCCONF=${__SRCCONF} \
+		installworld installkernel distribution
+	sudo umount ${MNTDIR}
+	
+	# Install uboot and ubldr
+	sudo mount_msdosfs /dev/${mddev}s1 ${MNTDIR}
+	sudo cp ${UBOOTDIR}/MLO ${MNTDIR}
+	sudo cp ${UBOOTDIR}/u-boot.img ${MNTDIR}
+	UBLDRDIR=`realpath $MAKEOBJDIRPREFIX`/arm.armv6/`realpath $FREEBSDSRC`/sys/boot/arm/uboot
+	sudo cp ${UBLDRDIR}/ubldr ${MNTDIR}/ubldr
+	sudo cp ${UBLDRDIR}/ubldr.bin ${MNTDIR}/ubldr.bin
+	sudo umount ${MNTDIR}
+	
+	# Configure system
+	sudo mount /dev/${mddev}s2a ${MNTDIR}
+	echo "/dev/ufs/rootfs   /       ufs     rw      1       1" \
+		| sudo tee -a ${MNTDIR}/etc/fstab > /dev/null
+	
+	# Cleanup
+	sudo umount ${MNTDIR}
+	sudo mdconfig -d -u ${mddev}
+	echo "Destroyed mddev ${mddev}"
+}
